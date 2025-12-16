@@ -69,12 +69,12 @@ export const NoteInput = () => {
             setIsUploading(false);
         }
 
-        await createNote(finalContent, mediaType, autoTags, uploadedFilePath);
-
-        // Reset form
+        // Optimistic Clear: Clear input immediately before request processing completes
         setContent('');
         setFile(null);
         if (fileInputRef.current) fileInputRef.current.value = '';
+
+        await createNote(finalContent, mediaType, autoTags, uploadedFilePath);
     };
 
     return (

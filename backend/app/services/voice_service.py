@@ -31,7 +31,7 @@ class VoiceService:
             return ""
 
     @staticmethod
-    async def process_audio(db: AsyncSession, audio_bytes: bytes) -> dict:
+    async def process_audio(db: AsyncSession, audio_bytes: bytes, background_tasks=None) -> dict:
         """
         Transcribe audio, SAVE IT, and process command.
         """
@@ -59,7 +59,7 @@ class VoiceService:
                 return {"response": "I didn't catch that."}
                 
             # 3. Process Text with Reference to Audio File
-            return await VoiceService.process_command(db, text, audio_path=file_path)
+            return await VoiceService.process_command(db, text, audio_path=file_path, background_tasks=background_tasks)
             
         except Exception as e:
             import traceback
@@ -112,7 +112,7 @@ class VoiceService:
         return None
 
     @staticmethod
-    async def process_command(db: AsyncSession, text: str, audio_path: str = None, generate_audio: bool = True) -> dict:
+    async def process_command(db: AsyncSession, text: str, audio_path: str = None, background_tasks=None, generate_audio: bool = True) -> dict:
         """
         Process a voice command via LLM and execute actions.
         Returns dict with text response and audio.
@@ -179,6 +179,10 @@ class VoiceService:
                 )
                 source_note = await NoteService.create_note(db, source_note_in) 
                 
+                # Fire & Forget Summary for Voice Note
+                if background_tasks and len(text) > 50 and not source_note.is_hidden:
+                     background_tasks.add_task(NoteService.background_summarize_note, source_note.id) 
+                
                 # Phase 2: Create the Task/Event Node if applicable
                 is_task_intent = (intent in ["TASK", "EVENT"])
                 
@@ -219,7 +223,9 @@ class VoiceService:
                     print(f"[Voice] Final Calculated Date: {event_at_dt}")
 
                     # CONFLICT DETECTION
-                    duration = data.get("event_duration", 60)
+                    duration = data.get("event_duration")
+                    if duration is None:
+                        duration = 60
                     conflict_name = None
                     if event_at_dt:
                         conflict_name = await VoiceService.check_conflict(db, event_at_dt, duration)
