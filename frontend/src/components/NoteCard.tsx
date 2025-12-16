@@ -40,7 +40,10 @@ export const NoteCard = ({ note }: NoteCardProps) => {
     // Poll for status update if processing
     useEffect(() => {
         let interval: any;
-        if (isProcessing) {
+        // Skip polling for optimistic/temp IDs (timestamps)
+        const isTempId = typeof note.id === 'number' && note.id > 1000000000000;
+
+        if (isProcessing && !isTempId) {
             interval = setInterval(async () => {
                 try {
                     const res = await fetch(`http://localhost:8000/api/notes/${note.id}`);
@@ -52,6 +55,9 @@ export const NoteCard = ({ note }: NoteCardProps) => {
                         if (!updatedNote.is_processing) {
                             setIsProcessing(false);
                         }
+                    } else if (res.status === 404) {
+                        // Note might have been deleted or ID changed
+                        setIsProcessing(false);
                     }
                 } catch (e) {
                     console.error("Polling failed", e);
@@ -232,8 +238,8 @@ export const NoteCard = ({ note }: NoteCardProps) => {
 
             {note.tags && note.tags.length > 0 && (
                 <div className="mt-4 flex flex-wrap gap-2">
-                    {note.tags.map(tag => (
-                        <span key={tag} className="text-[10px] font-bold text-banana bg-banana/10 px-2 py-1 rounded hover:bg-banana/20 transition-colors cursor-pointer">#{tag}</span>
+                    {note.tags.map((tag, i) => (
+                        <span key={`${tag}-${i}`} className="text-[10px] font-bold text-banana bg-banana/10 px-2 py-1 rounded hover:bg-banana/20 transition-colors cursor-pointer">#{tag}</span>
                     ))}
                 </div>
             )}

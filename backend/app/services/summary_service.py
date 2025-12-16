@@ -32,9 +32,15 @@ class SummaryService:
             priority: Literal["High", "Medium", "Low"]
             timeline: Literal["Today", "This Week", "Upcoming"]
 
+        class EventItem(BaseModel):
+            title: str
+            date_time: str
+            duration_minutes: int = 60
+
         class RollingSummaryResponse(BaseModel):
             summary: str
             tasks: List[TaskItem]
+            events: List[EventItem] = []
 
         try:
             # Use Structured Outputs
@@ -50,11 +56,76 @@ class SummaryService:
             import json
             data = json.loads(summary_json_str)
             summary_content = data.get("summary", "")
-            # Note: The tasks extracted here are currently not used/saved in the next block
-            # (The code below only saves summary_text). 
-            # If we want to use tasks, we should save them too, but keeping scope minimal for now.
-            # Just ensuring the summary generation is robust.
             
+            # Extract and Save Tasks
+            tasks_data = data.get("tasks", [])
+            from app.schemas.note import NoteCreate
+            from app.models.base import MediaType
+
+            print(f"[Summary] Extracted {len(tasks_data)} tasks. Saving...")
+
+            for t in tasks_data:
+                try:
+                    # Construct Note for the task
+                    task_content = t.get("task")
+                    if not task_content: continue
+                    
+                    priority = t.get("priority", "Medium")
+                    timeline = t.get("timeline", "Today")
+                    
+                    task_note_in = NoteCreate(
+                        content=task_content,
+                        media_type=MediaType.TEXT,
+                        tags=["todo", "ai-generated", priority, timeline],
+                        is_task=True,
+                        category=priority,
+                        is_completed=False,
+                        origin_note_id=notes[0].id if notes else None
+                    )
+                    
+                    # Create the task note using NoteService
+                    await NoteService.create_note(db, task_note_in)
+                    
+                except Exception as task_e:
+                    print(f"Failed to create task note: {task_e}")
+
+            # Extract and Save Events
+            events_data = data.get("events", [])
+            print(f"[Summary] Extracted {len(events_data)} events. Saving...")
+            
+            import dateparser
+            
+            for e in events_data:
+                try:
+                    event_title = e.get("title")
+                    event_time_str = e.get("date_time")
+                    if not event_title or not event_time_str: continue
+                    
+                    # Parse Date
+                    event_dt = dateparser.parse(event_time_str, settings={'RELATIVE_BASE': datetime.datetime.now(), 'PREFER_DATES_FROM': 'future'})
+                    
+                    if not event_dt:
+                        print(f"Could not parse date for event: {event_time_str}")
+                        continue
+                        
+                    event_note_in = NoteCreate(
+                        content=event_title,
+                        media_type=MediaType.TEXT,
+                        tags=["event", "ai-generated"],
+                        is_task=True,
+                        category="Event",
+                        is_completed=False,
+                        origin_note_id=notes[0].id if notes else None,
+                        event_at=event_dt,
+                        event_duration=e.get("duration_minutes", 60)
+                    )
+                     # Create the event note
+                    await NoteService.create_note(db, event_note_in)
+                    print(f"Created event: {event_title} at {event_dt}")
+                    
+                except Exception as event_e:
+                    print(f"Failed to create event note: {event_e}")
+
             # create summary record
             new_summary = Summary(
                 summary_text=summary_content,

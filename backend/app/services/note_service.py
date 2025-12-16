@@ -10,20 +10,15 @@ from app.services.vector_service import VectorService
 class NoteService:
     @staticmethod
     async def create_note(db: AsyncSession, note_in: NoteCreate) -> Note:
-        from app.services.summary_service import SummaryService # Import inside to avoid circular deps if any
-        
-        summary_text = None
-        # Only auto-summarize visible notes (parents), not hidden chunks
-        if len(note_in.content) > 500 and not getattr(note_in, 'is_hidden', False):
-             summary_text = await SummaryService.summarize_single_note(note_in.content)
-
         # 1. Create Note in main table
+        # Summarization is now handled via BackgroundTasks in the API layer
+        
         db_note = Note(
             content=note_in.content,
             media_type=note_in.media_type,
             tags=note_in.tags,
             file_path=note_in.file_path,
-            summary=summary_text,
+            summary=None, # Filled later by background task
             parent_id=getattr(note_in, 'parent_id', None),
             is_hidden=getattr(note_in, 'is_hidden', False),
             is_processing=getattr(note_in, 'is_processing', False),
@@ -37,6 +32,13 @@ class NoteService:
         db.add(db_note)
         await db.commit()
         await db.refresh(db_note)
+
+        # 2. Vector Embedding (Only if not processing in background)
+        # Note: We keep embedding synchronous for now to ensure search works instantly?
+        # Actually, for "Super Fast", we should technically verify if embedding blocks.
+        # It takes ~200ms for short text. Let's keep it sync for now as users expect immediate searchability.
+        # But we could move it to background too if needed.
+
 
         # 2. Vector Embedding (Only if not processing in background)
         # If is_processing=True, we skip embedding here; the background task will do it later for chunks.
@@ -64,8 +66,8 @@ class NoteService:
                     tag_str = ", ".join(note_in.tags)
                     parts.append(f"Tags: {tag_str}")
                 
-                if summary_text:
-                    parts.append(f"Summary: {summary_text}")
+                if db_note.summary:
+                    parts.append(f"Summary: {db_note.summary}")
                 
                 parts.append(f"Content: {note_in.content}")
                 
@@ -457,3 +459,30 @@ class NoteService:
         await db.commit()
         
         return True
+
+    @staticmethod
+    async def background_summarize_note(note_id: int):
+        """
+        Background Task: Generate summary for a note.
+        Uses its own DB session.
+        """
+        from app.services.summary_service import SummaryService
+        from db.database import async_session_maker
+        from app.models.base import Note
+        
+        async with async_session_maker() as db:
+            stmt = select(Note).where(Note.id == note_id)
+            result = await db.execute(stmt)
+            note = result.scalars().first()
+            
+            if not note or not note.content:
+                return
+                
+            try:
+                # print(f"[BG] Summarizing note {note_id}...")
+                summary_text = await SummaryService.summarize_single_note(note.content)
+                note.summary = summary_text
+                await db.commit()
+                # print(f"[BG] Note {note_id} summarized.")
+            except Exception as e:
+                print(f"[BG] Summary failed for {note_id}: {e}")

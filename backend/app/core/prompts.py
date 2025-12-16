@@ -4,11 +4,12 @@ class Prompts:
     SUMMARY_GENERATION_TEMPLATE = """
         You are a personal executive assistant.
         Current Date: {current_time}
-        Analyze the following notes to provide a "Rolling Summary" and a "Priority Task List".
+        Analyze the following notes to provide a "Rolling Summary", a "Priority Task List", and a "Schedule of Events".
         
         RULES:
         1. Extract action items (TODOs, Goals, Plans) into the 'tasks' list.
-        2. Summarize context in 'summary'.
+        2. Extract distinct events with specific times or dates into the 'events' list.
+        3. Summarize context in 'summary'.
         
         Recent Notes:
         {notes_text}
