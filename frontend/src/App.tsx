@@ -79,13 +79,7 @@ function App() {
             >
               Thinking Space
             </button>
-            <button
-              onClick={() => setView('calendar')}
-              className={`text-sm font-bold pb-4 border-b-2 transition-all ${view === 'calendar' ? 'text-banana border-banana' : 'text-ash-gray border-transparent hover:text-white'} flex items-center gap-2`}
-            >
-              <CalendarIcon className="h-4 w-4" />
-              Calendar
-            </button>
+
             <button
               onClick={() => setView('image')}
               className={`text-sm font-bold pb-4 border-b-2 transition-all ${view === 'image' ? 'text-banana border-banana' : 'text-ash-gray border-transparent hover:text-white'} flex items-center gap-2`}
@@ -153,6 +147,16 @@ function App() {
 
         {/* VoiceAgent component */}
         <VoiceAgent />
+
+        {/* Calendar FAB (Left Side, Purple Theme) */}
+        <button
+          onClick={() => setView(view === 'calendar' ? 'timeline' : 'calendar')}
+          className={`fixed bottom-6 left-6 p-4 rounded-full shadow-xl transition-all z-50 group border border-white/20
+            ${view === 'calendar' ? 'bg-purple-700 text-white ring-2 ring-purple-400' : 'bg-purple-600 hover:bg-purple-500 text-white'}`}
+          title="Calendar"
+        >
+          <CalendarIcon className="w-6 h-6 group-hover:scale-110 transition-transform" />
+        </button>
       </main>
     </div>
   );
