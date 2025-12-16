@@ -1,0 +1,83 @@
+Query: Her lunch with Sarah tomorrow at 3 p.m.
+Context: Today is Monday, December 15, 2025. Current time is 03:37 PM.
+LLM Raw: 2025-12-19T15:00:00
+
+Query: Lunch with Sara at tomorrow 3 p.m.
+Context: Today is Monday, December 15, 2025. Current time is 03:40 PM.
+LLM Raw: 2025-12-16T15:00:00
+
+Query: a scheduler dinner with legs tomorrow at 9 pm
+Context: Today is Monday, December 15, 2025. Current time is 03:53 PM.
+LLM Raw: 2025-12-19T21:00:00
+
+Query: Lunch with Sarah tomorrow at 3 p.m.
+Context: Today is Monday, December 15, 2025. Current time is 04:24 PM.
+LLM Raw: 2025-12-16T15:00:00
+
+Query: Show me everything that I have for tomorrow.
+Context: Today is Monday, December 15, 2025. Current time is 04:25 PM.
+LLM Raw: 2025-12-16T00:00:00
+
+Query: Bimilk
+Context: Today is Monday, December 15, 2025. Current time is 04:25 PM.
+LLM Raw: 2025-12-15T16:25:00
+
+Query: Breakfast with monks at 9 am tomorrow
+Context: Today is Monday, December 15, 2025. Current time is 04:35 PM.
+LLM Raw: 2025-12-16T09:00:00
+
+Query: Breakfast with monks at 9 am tomorrow
+Context: Today is Monday, December 15, 2025. Current time is 04:35 PM.
+LLM Raw: 2025-12-16T09:00:00
+
+Query: Your container doesn't have GPU drivers installed. So how does PyTorch inside it use the host's GPU?
+
+This confused me for a while. Here's what's actually happening:
+
+When PyTorch runs a CUDA operation, it doesn't talk to the GPU directly.
+It goes through the CUDA Runtime → CUDA Driver → /dev/nvidia0 device file → Linux Kernel → actual GPU hardware.
+
+The driver lives on the host and the runtime lives in the container. So how do they connect?
+
+🪄 The answer is OCI runtime hooks.
+
+When containerd starts your container, the NVIDIA Container Toolkit intercepts the process at the prestart/createRuntime hook.
+Before your app even starts, it:
+
+- Mounts GPU device files (/dev/nvidia*)
+- Injects NVIDIA driver libraries from the host
+- Sets environment variables (NVIDIA_VISIBLE_DEVICES)
+- Configures device cgroups
+
+Your container image stays generic and the GPU capabilities get injected at runtime.
+
+That's why you can use a standard nvidia/cuda base image and it "just works" — the toolkit adds everything needed at the last moment.
+
+Context: Today is Monday, December 15, 2025. Current time is 04:36 PM.
+LLM Raw: 2025-12-15T04:36:00
+
+Query: Lunch tomorrow at 3 p.m. with monkey.
+Context: Today is Monday, December 15, 2025. Current time is 05:39 PM.
+LLM Raw: 2025-12-16T15:00:00
+
+Query: Lunch on comming wed at 3 p.m. with monkey.
+Context: Today is Monday, December 15, 2025. Current time is 05:44 PM.
+LLM Raw: 2025-12-15T15:00:00
+
+Query: Lunch with monks on wednesday at 3 pm
+
+Context: Today is Monday, December 15, 2025. Current time is 05:45 PM.
+LLM Raw: 2025-12-19T15:00:00
+
+Query: buy milk 
+Context: Today is Monday, December 15, 2025. Current time is 05:53 PM.
+LLM Raw: 2025-12-15T17:53:00
+
+Query: Find me all the events where I have lunch with Monkey
+Context: Today is Monday, December 15, 2025. Current time is 07:56 PM.
+LLM Raw: 2025-12-15T08:00:00
+
+Query: Set up an interview with Neymar tomorrow at 5 p.m.
+Context: Today is Monday, December 15, 2025. Current time is 11:38 PM.
+LLM Raw: 2025-12-26T17:00:00
+

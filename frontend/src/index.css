@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@theme {
+  --color-banana: #FFE135;
+  --color-nano-dark: #0F0F11;
+  --color-graphite: #1C1C1E;
+  --color-neural-purple: #A855F7;
+  --color-ash-gray: #A1A1AA;
+  --color-radical-red: #FF453A;
+  --color-mint: #4ADE80;
+
+  --font-sans: "Inter", sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-nano-dark);
+    color: white;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background-color: var(--color-banana);
+    color: black;
+  }
+}
