@@ -144,11 +144,11 @@ export const TodoList = () => {
                                                 <p className="text-sm text-white font-medium leading-relaxed">
                                                     {event.content}
                                                 </p>
-                                                {event.origin_note_id && (
+                                                {(event.origin_note_id || event.media_type === 'voice') && (
                                                     <button
-                                                        onClick={() => toggleSource(event.id, event.origin_note_id!)}
+                                                        onClick={() => event.origin_note_id ? toggleSource(event.id, event.origin_note_id) : toggleSource(event.id, event.id)}
                                                         className="text-banana/50 hover:text-banana ml-2 transition-colors"
-                                                        title={expandedSourceId === event.id ? 'Hide Source Note' : 'View Source Note'}
+                                                        title="View Details"
                                                     >
                                                         <InformationCircleIcon className="h-4 w-4" />
                                                     </button>
@@ -163,26 +163,45 @@ export const TodoList = () => {
                                             </p>
 
                                             {/* Expanded Source View */}
-                                            {expandedSourceId === event.id && event.origin_note_id && (
+                                            {expandedSourceId === event.id && (
                                                 <div className="mt-2 p-2 bg-black/20 rounded-lg border border-white/5 text-xs text-ash-gray animate-in fade-in slide-in-from-top-1">
-                                                    {sourceNotes[event.origin_note_id] ? (
+                                                    {event.origin_note_id ? (
+                                                        sourceNotes[event.origin_note_id] ? (
+                                                            <>
+                                                                <div className="flex items-center gap-2 mb-1 opacity-70">
+                                                                    <span className="uppercase text-[8px] tracking-wider font-bold">Original Memory</span>
+                                                                    {sourceNotes[event.origin_note_id].media_type === 'voice' && <span className="bg-white/10 px-1 rounded text-[8px]">VOICE</span>}
+                                                                </div>
+                                                                <p className="italic">"{sourceNotes[event.origin_note_id].content}"</p>
+
+                                                                {sourceNotes[event.origin_note_id].file_path && sourceNotes[event.origin_note_id].media_type === 'voice' && (
+                                                                    <audio
+                                                                        controls
+                                                                        className="w-full mt-2 h-6 opacity-80"
+                                                                        src={`http://localhost:8000/files/audio/${sourceNotes[event.origin_note_id].file_path.split('/').pop()}`}
+                                                                    />
+                                                                )}
+                                                            </>
+                                                        ) : (
+                                                            <span className="animate-pulse">Loading source...</span>
+                                                        )
+                                                    ) : (
+                                                        /* Single Note Flow Display */
                                                         <>
                                                             <div className="flex items-center gap-2 mb-1 opacity-70">
-                                                                <span className="uppercase text-[8px] tracking-wider font-bold">Original Memory</span>
-                                                                {sourceNotes[event.origin_note_id].media_type === 'voice' && <span className="bg-white/10 px-1 rounded text-[8px]">VOICE</span>}
+                                                                <span className="uppercase text-[8px] tracking-wider font-bold">Details</span>
+                                                                {event.media_type === 'voice' && <span className="bg-white/10 px-1 rounded text-[8px]">VOICE</span>}
                                                             </div>
-                                                            <p className="italic">"{sourceNotes[event.origin_note_id].content}"</p>
-
-                                                            {sourceNotes[event.origin_note_id].file_path && sourceNotes[event.origin_note_id].media_type === 'voice' && (
+                                                            {/* Since content is overwritten, we can't show original text unless we stored it. Just show audio. */}
+                                                            {event.file_path && event.media_type === 'voice' && (
                                                                 <audio
                                                                     controls
                                                                     className="w-full mt-2 h-6 opacity-80"
-                                                                    src={`http://localhost:8000/files/audio/${sourceNotes[event.origin_note_id].file_path.split('/').pop()}`}
+                                                                    src={`http://localhost:8000/files/audio/${event.file_path.split('/').pop()}`}
                                                                 />
                                                             )}
+                                                            {!event.file_path && <p className="italic opacity-50">No additional details.</p>}
                                                         </>
-                                                    ) : (
-                                                        <span className="animate-pulse">Loading source...</span>
                                                     )}
                                                 </div>
                                             )}
