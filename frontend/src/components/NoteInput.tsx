@@ -1,114 +1,290 @@
-import { useState, useRef } from 'react';
+import type { NoteResponse } from '../client';
+import { PhotoIcon, MicrophoneIcon, DocumentTextIcon, TrashIcon, ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 import { useNoteStore } from '../stores/noteStore';
-import { PaperClipIcon, PaperAirplaneIcon } from '@heroicons/react/24/outline';
-import axios from 'axios';
+import { useSettingsStore } from '../stores/settingsStore';
+import { useState, useEffect } from 'react';
+import { AgentChatModal } from './AgentChatModal';
 
-export const NoteInput = () => {
-    const { createNote, fetchTimeline } = useNoteStore();
-    const [content, setContent] = useState('');
-    const [file, setFile] = useState<File | null>(null);
+interface NoteCardProps {
+    note: NoteResponse;
+}
 
-    const [isUploading, setIsUploading] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
+export const NoteCard = ({ note }: NoteCardProps) => {
+    const { deleteNote } = useNoteStore();
+    const { timezone } = useSettingsStore();
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
+    // Ensure date is treated as UTC if naive
+    const rawDate = note.created_at;
+    const dateStr = rawDate.endsWith('Z') || rawDate.includes('+') ? rawDate : `${rawDate}Z`;
 
-        // Optimistic Clear
-        const pendingContent = content;
-        const pendingFile = file;
+    const date = new Date(dateStr).toLocaleString('en-US', {
+        timeZone: timezone,
+        dateStyle: 'medium',
+        timeStyle: 'short'
+    });
 
-        // Reset UI immediately
-        setContent('');
-        setFile(null);
+    const [expanded, setExpanded] = useState(false);
+    const [isChatOpen, setIsChatOpen] = useState(false);
 
-        setIsUploading(false); // No blocking overlay needed anymore
-        if (fileInputRef.current) fileInputRef.current.value = '';
+    // Local state to track full note data (for polling updates)
+    const [currentNote, setCurrentNote] = useState(note);
+    const [isProcessing, setIsProcessing] = useState(note.is_processing);
 
-        if (!pendingContent.trim() && !pendingFile) return;
+    // Derived values from currentNote (not prop note)
+    const summary = currentNote.summary;
+    const isPdf = currentNote.media_type === 'pdf' || currentNote.file_path?.endsWith('.pdf');
+    const isImage = currentNote.media_type === 'image';
+    const fileUrl = currentNote.file_path ? `http://localhost:8000/files/${currentNote.file_path.replace(/^dumps\//, '')}` : '';
+    const fileName = currentNote.file_path ? currentNote.file_path.split('/').pop() : 'Document';
 
-        // If File, use Unified Upload Flow
-        if (pendingFile) {
-            try {
-                const formData = new FormData();
-                formData.append('file', pendingFile);
-                if (pendingContent.trim()) {
-                    formData.append('content', pendingContent);
+    // Poll for status update if processing
+    useEffect(() => {
+        let interval: any;
+        // Skip polling for optimistic/temp IDs (timestamps)
+        const isTempId = typeof note.id === 'number' && note.id > 1000000000000;
+
+        if (isProcessing && !isTempId) {
+            interval = setInterval(async () => {
+                try {
+                    const res = await fetch(`http://localhost:8000/api/notes/${note.id}`);
+                    if (res.ok) {
+                        const updatedNote = await res.json();
+                        // Update local state with fresh data (summary, etc.)
+                        setCurrentNote(updatedNote);
+
+                        if (!updatedNote.is_processing) {
+                            setIsProcessing(false);
+                        }
+                    } else if (res.status === 404) {
+                        // Note might have been deleted or ID changed
+                        setIsProcessing(false);
+                    }
+                } catch (e) {
+                    console.error("Polling failed", e);
                 }
+            }, 3000);
+        }
+        return () => clearInterval(interval);
+    }, [isProcessing, note.id]);
 
-                // Fire and forget (mostly), UI updates via timeline polling
-                await axios.post('http://localhost:8000/api/upload', formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' }
-                });
-
-                // Fetch to show "Processing..." card
-                fetchTimeline();
-
-            } catch (error) {
-                console.error("Upload failed", error);
-                alert("File upload failed. Please try again.");
-                // Restore state? or leave it cleared? 
-                // Currently leaving cleared, maybe user can retry from timeline?
-                // But the note wasn't created if upload 500'd.
-                // Restoring content would be nice, but for now simple behavior.
-                setContent(pendingContent);
-            }
-        } else {
-            // Text Only Flow (Legacy)
-            await createNote(pendingContent, 'text', [], undefined);
+    const handleDelete = async () => {
+        if (window.confirm('Are you sure you want to delete this note permanently?')) {
+            await deleteNote(currentNote.id);
         }
     };
 
+    const handleRetry = async () => {
+        setIsProcessing(true);
+        try {
+            await fetch(`http://localhost:8000/api/notes/${note.id}/retry`, { method: 'POST' });
+            // UI will update via polling
+        } catch (e) {
+            console.error("Retry failed", e);
+            setIsProcessing(false);
+            alert("Retry failed.");
+        }
+    };
+
+    const hasFailed = note.tags && note.tags.includes('processing_failed');
+
     return (
-        <form onSubmit={handleSubmit} className="bg-graphite p-1.5 rounded-3xl shadow-lg border border-white/5 relative group focus-within:ring-2 focus-within:ring-banana/50 transition-all">
+        <div className={`bg-graphite p-5 rounded-2xl border mb-4 transition-all shadow-sm group relative ${hasFailed ? 'border-red-500/30' : 'border-white/5 hover:border-banana/30'}`}>
+            {/* Delete Button */}
+            <button
+                onClick={handleDelete}
+                className="absolute top-4 right-4 text-ash-gray hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1 z-10"
+                title="Delete dump"
+            >
+                <TrashIcon className="h-4 w-4" />
+            </button>
 
+            {/* Header: Date + Optional Icon for Voice/Text/Event */}
+            <div className="flex items-center gap-2 mb-3 opacity-60 flex-wrap">
+                {currentNote.media_type === 'voice' && <MicrophoneIcon className="h-3 w-3 text-neural-purple" />}
+                {currentNote.media_type === 'text' && <DocumentTextIcon className="h-3 w-3 text-ash-gray" />}
 
-            <textarea
-                className="w-full p-4 bg-transparent text-white placeholder-ash-gray border-none focus:ring-0 resize-none rounded-2xl text-base"
-                rows={3}
-                placeholder="What's on your mind?"
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                disabled={isUploading}
-            />
+                <span className="text-[10px] text-ash-gray font-mono uppercase tracking-wider" title="Created At">
+                    {date}
+                </span>
 
-            <div className="flex justify-between items-center px-2 pb-2">
-                <div className="flex items-center gap-2">
-                    <label className={`cursor-pointer px-3 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 border border-transparent
-                        ${file ? 'bg-banana/20 text-banana border-banana/20' : 'hover:bg-white/5 text-ash-gray hover:text-white'}`}>
-                        <PaperClipIcon className="h-5 w-5" />
-                        <span className="text-xs truncate max-w-[150px]">{file ? file.name : 'Attach (Img/Audio/PDF)'}</span>
-                        <input
-                            type="file"
-                            className="hidden"
-                            accept="image/*,audio/*,application/pdf"
-                            ref={fileInputRef}
-                            onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)}
-                        />
-                    </label>
-                    {file && (
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setFile(null);
-                                if (fileInputRef.current) fileInputRef.current.value = '';
-                            }}
-                            className="text-xs text-red-400 hover:text-red-300 transition-colors"
-                        >
-                            Remove
-                        </button>
+                {/* Event Time Badge */}
+                {note.event_at && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-banana bg-banana/10 px-2 py-0.5 rounded-full border border-banana/20 uppercase tracking-wide">
+                        <span className="w-1.5 h-1.5 rounded-full bg-banana animate-pulse"></span>
+                        Event: {new Date(note.event_at).toLocaleString('en-US', {
+                            timeZone: timezone,
+                            weekday: 'short',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: 'numeric',
+                            minute: '2-digit'
+                        })}
+                    </span>
+                )}
+            </div>
+
+            {/* Failed State / Retry */}
+            {hasFailed && !isProcessing && (
+                <div className="mb-3 bg-red-500/10 border border-red-500/20 rounded-xl p-3 flex items-center justify-between">
+                    <span className="text-xs text-red-400 font-medium">Analysis Failed</span>
+                    <button
+                        onClick={handleRetry}
+                        className="text-xs bg-red-500/20 hover:bg-red-500/30 text-red-300 px-3 py-1 rounded-lg transition-colors font-bold"
+                    >
+                        Retry Analysis
+                    </button>
+                </div>
+            )}
+
+            {/* Processing State */}
+            {isProcessing && (
+                <div className="mb-3 flex items-center gap-2 text-xs text-banana animate-pulse font-medium">
+                    <span className="w-2 h-2 bg-banana rounded-full"></span>
+                    Processing...
+                </div>
+            )}
+
+            {/* Content: Hide text summary/content if it is an image */}
+            {!isImage && (
+                <div className={`prose prose-sm max-w-none text-gray-300 whitespace-pre-wrap leading-relaxed ${isProcessing ? 'opacity-50' : ''}`}>
+                    {summary && !expanded ? (
+                        <div>
+                            <p className="italic text-gray-400 border-l-2 border-banana/30 pl-3 mb-2">{summary}</p>
+                            <button
+                                onClick={() => setExpanded(true)}
+                                className="text-xs text-banana hover:underline font-bold top-1 relative"
+                            >
+                                {fileName} &rarr;
+                            </button>
+                        </div>
+                    ) : (
+                        <div>
+                            {!expanded && !summary && currentNote.content.length > 500 ? (
+                                <div>
+                                    {currentNote.content.substring(0, 500)}...
+                                    <button
+                                        onClick={() => setExpanded(true)}
+                                        className="block mt-2 text-xs text-banana hover:underline font-bold"
+                                    >
+                                        Read more
+                                    </button>
+                                </div>
+                            ) : (
+                                <div>
+                                    {currentNote.content}
+                                    {(summary || currentNote.content.length > 500) && expanded && (
+                                        <button
+                                            onClick={() => setExpanded(false)}
+                                            className="block mt-2 text-xs text-ash-gray hover:text-white"
+                                        >
+                                            Show Less
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                     )}
                 </div>
+            )}
 
-                <button
-                    type="submit"
-                    className="bg-banana hover:bg-yellow-400 text-black px-4 py-2 rounded-full font-bold shadow-lg shadow-banana/10 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 transition-transform active:scale-95"
-                    disabled={isUploading || (!content && !file)}
-                >
-                    <span>{isUploading ? 'Uploading...' : 'Dump'}</span>
-                    {!isUploading && <PaperAirplaneIcon className="h-4 w-4" />}
-                </button>
-            </div>
-        </form>
+            {/* Attachments */}
+            {note.file_path && (
+                <div className="mt-3">
+                    {/* Audio Player */}
+                    {(note.media_type === 'voice' || note.file_path?.endsWith('.wav')) && (
+                        <div className="w-full bg-black/20 rounded-xl p-3 border border-white/5">
+                            <audio
+                                controls
+                                src={fileUrl}
+                                className="w-full h-8 [&::-webkit-media-controls-panel]:bg-transparent [&::-webkit-media-controls-enclosure]:bg-transparent"
+                            />
+                        </div>
+                    )}
+
+                    {/* Image Preview - Click to open */}
+                    {isImage && (
+                        <a
+                            href={fileUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block group/image overflow-hidden rounded-xl border border-white/10 relative max-w-md"
+                        >
+                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-opacity flex items-center justify-center z-10">
+                                <span className="text-white text-xs font-bold uppercase tracking-wider flex items-center gap-2 bg-black/50 px-3 py-1 rounded-full border border-white/20 backdrop-blur-sm">
+                                    <PhotoIcon className="h-4 w-4" />
+                                    Open Image
+                                </span>
+                            </div>
+                            <img
+                                src={fileUrl}
+                                alt="Note attachment"
+                                className={`w-full h-auto object-cover transform group-hover/image:scale-105 transition-transform duration-500 ${isProcessing && 'blur-sm grayscale'}`}
+                                loading="lazy"
+                            />
+                        </a>
+                    )}
+
+                    {/* PDF Handling */}
+                    {isPdf && (
+                        <div className="flex flex-wrap gap-2 mt-2">
+                            {/* Open Button */}
+                            <a
+                                href={fileUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors text-xs font-bold text-ash-gray hover:text-banana group/btn"
+                            >
+                                <DocumentTextIcon className="h-4 w-4 group-hover/btn:text-banana transition-colors" />
+                                Open PDF
+                            </a>
+
+                            {/* Chat Button */}
+                            <button
+                                onClick={() => setIsChatOpen(true)}
+                                className={`flex items-center gap-2 text-xs font-bold px-4 py-2 rounded-lg transition-all border border-transparent
+                                    ${isProcessing
+                                        ? 'bg-banana/5 text-banana animate-pulse cursor-wait'
+                                        : 'text-banana hover:text-white bg-banana/10 hover:bg-banana/20 hover:border-banana/30'}`}
+                            >
+                                {isProcessing ? (
+                                    <>
+                                        <span className="animate-spin h-3 w-3 border-2 border-banana border-t-transparent rounded-full"></span>
+                                        Reading file...
+                                    </>
+                                ) : (
+                                    <>
+                                        <ChatBubbleLeftRightIcon className="w-4 h-4" />
+                                        Chat with PDF Agent
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Generic File Handling (if not image, pdf, or audio) */}
+                    {!isImage && !isPdf && note.media_type !== 'voice' && !note.file_path?.endsWith('.wav') && (
+                        <a href={fileUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded text-xs text-ash-gray hover:text-banana transition-colors mt-2">
+                            <DocumentTextIcon className="h-3 w-3" />
+                            Open Attachment
+                        </a>
+                    )}
+                </div>
+            )}
+
+            {note.tags && note.tags.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                    {note.tags.map((tag, i) => (
+                        <span key={`${tag}-${i}`} className={`text-[10px] font-bold px-2 py-1 rounded transition-colors cursor-pointer ${tag === 'processing_failed' ? 'bg-red-500/20 text-red-400' : 'text-banana bg-banana/10 hover:bg-banana/20'}`}>#{tag}</span>
+                    ))}
+                </div>
+            )}
+
+            <AgentChatModal
+                isOpen={isChatOpen}
+                onClose={() => setIsChatOpen(false)}
+                noteId={note.id}
+                title={note.file_path ? note.file_path.split('/').pop() || 'PDF' : 'PDF Document'}
+            />
+        </div>
     );
 };

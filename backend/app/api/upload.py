@@ -130,7 +130,7 @@ async def process_pdf_task(file_path: str, parent_note_id: int):
             print(f"Background PDF processing failed: {e}")
             # Optionally mark as failed or handle error in DB
 
-@router.post("/upload", response_model=Note) # Changed from UploadResponse to Note
+@router.post("/upload", response_model=NoteResponse) # Changed from UploadResponse to NoteResponse
 async def upload_file(
     file: UploadFile = File(...),
     content: Optional[str] = Form(None), # Added content parameter
@@ -237,6 +237,10 @@ async def process_image_task(file_path: str, note_id: int):
             current_note = await NoteService.get_note(db, note_id)
             new_content = description
             
+            # Merge tags but remove 'processing'
+            existing_tags = current_note.tags if current_note else []
+            final_tags = list(set([t for t in existing_tags if t != "processing"] + tags))
+            
             if current_note:
                 if "Processing" in current_note.content:
                      new_content = description
@@ -246,7 +250,7 @@ async def process_image_task(file_path: str, note_id: int):
             await NoteService.update_note(db, note_id, {
                 "content": new_content,
                 "is_processing": False,
-                "tags": list(set(current_note.tags + tags)) if current_note else tags
+                "tags": final_tags
             })
             print(f"[Image] Finished Note {note_id}")
 
@@ -263,6 +267,11 @@ async def process_audio_task(file_path: str, note_id: int):
         try:
             print(f"[Audio] Queued {file_path} for Note {note_id}")
             text = await run_with_semaphore(MultimodalService.process_audio(file_path))
+            
+            # Remove processing tag
+            # We don't fetch note here, but we should if we want to preserve other tags?
+            # Or just overwrite since audio usually doesn't have other tags initially except media_type?
+            # Safe to just set tags as [voice, audio]
             
             await NoteService.update_note(db, note_id, {
                 "content": text,
