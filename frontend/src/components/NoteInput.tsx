@@ -7,89 +7,61 @@ export const NoteInput = () => {
     const { createNote, fetchTimeline } = useNoteStore();
     const [content, setContent] = useState('');
     const [file, setFile] = useState<File | null>(null);
-    const [uploadProgress, setUploadProgress] = useState(0);
+
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!content.trim() && !file) return;
 
-        let finalContent = content;
-        let mediaType: any = 'text';
-        let uploadedFilePath: string | undefined = undefined;
-        let autoTags: string[] = [];
+        // Optimistic Clear
+        const pendingContent = content;
+        const pendingFile = file;
 
-        // Upload Phase (Active)
-        if (file) {
-            setIsUploading(true);
-            setUploadProgress(0);
+        // Reset UI immediately
+        setContent('');
+        setFile(null);
+
+        setIsUploading(false); // No blocking overlay needed anymore
+        if (fileInputRef.current) fileInputRef.current.value = '';
+
+        if (!pendingContent.trim() && !pendingFile) return;
+
+        // If File, use Unified Upload Flow
+        if (pendingFile) {
             try {
-                // Use axios for progress tracking
                 const formData = new FormData();
-                formData.append('file', file);
-
-                const response = await axios.post('http://localhost:8000/api/upload', formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                    onUploadProgress: (progressEvent) => {
-                        const total = progressEvent.total || file.size;
-                        const percent = Math.round((progressEvent.loaded * 100) / total);
-                        setUploadProgress(percent);
-                    }
-                });
-
-                const uploadResult = response.data;
-
-                // PDF Logic: "Optimistic Transition"
-                if (uploadResult.media_type === 'pdf') {
-                    // Reset immediately (Passive Phase)
-                    setContent('');
-                    setFile(null);
-                    setUploadProgress(0);
-                    setIsUploading(false);
-                    if (fileInputRef.current) fileInputRef.current.value = '';
-
-                    // Refresh timeline to show the "Processing..." card
-                    fetchTimeline();
-                    return;
+                formData.append('file', pendingFile);
+                if (pendingContent.trim()) {
+                    formData.append('content', pendingContent);
                 }
 
-                finalContent = content ? `${content}\n\n${uploadResult.extracted_content}` : uploadResult.extracted_content;
-                mediaType = uploadResult.media_type;
-                uploadedFilePath = uploadResult.file_path;
-                autoTags = uploadResult.tags || [];
+                // Fire and forget (mostly), UI updates via timeline polling
+                await axios.post('http://localhost:8000/api/upload', formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' }
+                });
+
+                // Fetch to show "Processing..." card
+                fetchTimeline();
 
             } catch (error) {
                 console.error("Upload failed", error);
-                alert("File upload failed");
-                setIsUploading(false);
-                setUploadProgress(0);
-                return;
+                alert("File upload failed. Please try again.");
+                // Restore state? or leave it cleared? 
+                // Currently leaving cleared, maybe user can retry from timeline?
+                // But the note wasn't created if upload 500'd.
+                // Restoring content would be nice, but for now simple behavior.
+                setContent(pendingContent);
             }
-            setIsUploading(false);
+        } else {
+            // Text Only Flow (Legacy)
+            await createNote(pendingContent, 'text', [], undefined);
         }
-
-        // Optimistic Clear: Clear input immediately before request processing completes
-        setContent('');
-        setFile(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-
-        await createNote(finalContent, mediaType, autoTags, uploadedFilePath);
     };
 
     return (
         <form onSubmit={handleSubmit} className="bg-graphite p-1.5 rounded-3xl shadow-lg border border-white/5 relative group focus-within:ring-2 focus-within:ring-banana/50 transition-all">
-            {isUploading && (
-                <div className="absolute inset-0 bg-black/80 z-50 rounded-3xl flex flex-col items-center justify-center backdrop-blur-sm">
-                    <div className="w-64 h-2 bg-white/20 rounded-full overflow-hidden mb-2">
-                        <div
-                            className="h-full bg-banana transition-all duration-200 ease-out"
-                            style={{ width: `${uploadProgress}%` }}
-                        />
-                    </div>
-                    <span className="text-banana font-bold text-sm">Uploading {uploadProgress}%</span>
-                </div>
-            )}
+
 
             <textarea
                 className="w-full p-4 bg-transparent text-white placeholder-ash-gray border-none focus:ring-0 resize-none rounded-2xl text-base"

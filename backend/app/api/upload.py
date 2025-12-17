@@ -2,18 +2,26 @@
 import os
 import shutil
 from typing import List, Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.config import settings
 from app.services.multimodal_service import MultimodalService
 from app.services.note_service import NoteService
-from app.schemas.note import NoteCreate
+from app.schemas.note import NoteCreate, NoteResponse
 from app.models.base import MediaType
 from db.database import get_db
 
 router = APIRouter()
+
+# Global Semaphore to limit concurrent LLM tasks
+import asyncio
+llm_semaphore = asyncio.Semaphore(1) # Limit to 1 concurrent task
+
+async def run_with_semaphore(coro):
+    async with llm_semaphore:
+        return await coro
 
 class UploadResponse(BaseModel):
     file_path: str
@@ -122,23 +130,21 @@ async def process_pdf_task(file_path: str, parent_note_id: int):
             print(f"Background PDF processing failed: {e}")
             # Optionally mark as failed or handle error in DB
 
-@router.post("/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=Note) # Changed from UploadResponse to Note
 async def upload_file(
     file: UploadFile = File(...),
+    content: Optional[str] = Form(None), # Added content parameter
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Optimistic Upload:
+    Unified Non-Blocking Upload:
     1. Saves File immediately.
-    2. Creates Parent Note immediately (is_processing=True).
-    3. Offloads Chunking/Embedding to Background Task (Queue).
-    4. Returns success immediately to unblock UI.
+    2. Creates Note immediately (is_processing=True).
+    3. Offloads Analysis to Background Task.
+    4. Returns Note immediately.
     """
     # 0. Size Limit Check (200MB)
-    # file.size is not always available depending on uvicorn buffer. 
-    # But usually manageable. 
-    # Better to check during read, but for simple check:
     MAX_SIZE = 200 * 1024 * 1024 # 200MB
     # Check size by seeking to end
     file.file.seek(0, 2)
@@ -155,6 +161,7 @@ async def upload_file(
     is_audio = content_type.startswith("audio/")
     is_pdf = content_type == "application/pdf"
     
+    sub_dir = "others"
     if is_image:
         media_type = "image"
         sub_dir = "images"
@@ -164,8 +171,6 @@ async def upload_file(
     elif is_pdf:
         media_type = "pdf"
         sub_dir = "pdf"
-    else:
-        sub_dir = "others"
     
     # 2. Save File
     upload_path = os.path.join(settings.UPLOAD_DIR, sub_dir)
@@ -178,49 +183,96 @@ async def upload_file(
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save file: {e}")
-        
-    extracted_text = ""
-    tags = []
-    chunks_created = 0
-    
-    # 3. Process Content
-    if is_image:
-        result = await MultimodalService.process_image(file_location)
-        if isinstance(result, dict):
-            extracted_text = result.get("description", "")
-            tags = result.get("tags", [])
-        else:
-            extracted_text = str(result)
-        
-    elif is_audio:
-        extracted_text = await MultimodalService.process_audio(file_location)
-        
-    elif is_pdf:
-        # Optimistic UI Logic
-        extracted_text = "PDF Uploaded. Processing in background..."
-        
-        # Create Shell Parent Note
-        parent_note_in = NoteCreate(
-            content=f"PDF: {file.filename}", # Use actual filename
-            media_type=MediaType.PDF,
-            tags=["pdf", "document", "processing"],
-            file_path=file_location,
-            is_hidden=False,
-            is_processing=True # Flag for UI
-        )
-        parent_note = await NoteService.create_note(db, parent_note_in)
-        
-        # Dispatch Background Task
-        # We pass file_path and ID. 
-        # Note: we need a fresh db session in background, handled by task function.
-        background_tasks.add_task(process_pdf_task, file_location, parent_note.id)
-        
-        chunks_created = 0 # Will be populated later
 
-    return {
-        "file_path": file_location,
-        "media_type": media_type,
-        "extracted_content": extracted_text,
-        "tags": tags,
-        "chunks_created": chunks_created
-    }
+    # 3. Create Note Immediately
+    note_content = content if content else f"Processing {media_type}..."
+    if is_pdf: note_content = f"PDF: {file.filename}"
+    
+    note_in = NoteCreate(
+        content=note_content,
+        media_type=MediaType(media_type), # Ensure MediaType enum is used
+        tags=[media_type, "processing"],
+        file_path=file_location,
+        is_hidden=False,
+        is_processing=True
+    )
+    note = await NoteService.create_note(db, note_in)
+
+    # 4. Dispatch Background Task
+    if is_pdf:
+        background_tasks.add_task(process_pdf_task, file_location, note.id)
+    elif is_image:
+        background_tasks.add_task(process_image_task, file_location, note.id) # To be implemented
+    elif is_audio:
+        # TODO: Implement Audio Background Task or keep sync if fast? 
+        # For uniformity, let's make it async too.
+        background_tasks.add_task(process_audio_task, file_location, note.id) # To be implemented
+    else:
+        # Just a file upload, mark processed
+        await NoteService.update_note(db, note.id, {"is_processing": False, "tags": [media_type]})
+
+    return note
+
+
+async def process_image_task(file_path: str, note_id: int):
+    """Background Image Analysis"""
+    async with async_session_maker() as db:
+        try:
+            print(f"[Image] Queued {file_path} for Note {note_id}")
+            # Wait for Semaphore
+            result = await run_with_semaphore(MultimodalService.process_image(file_path))
+            
+            description = ""
+            tags = []
+            if isinstance(result, dict):
+                description = result.get("description", "")
+                tags = result.get("tags", [])
+            else:
+                description = str(result)
+            
+            # Enrich tags
+            tags.append("image")
+            
+            # Update Note
+            current_note = await NoteService.get_note(db, note_id)
+            new_content = description
+            
+            if current_note:
+                if "Processing" in current_note.content:
+                     new_content = description
+                else:
+                     new_content = f"{current_note.content}\n\n[AI Analysis]: {description}"
+
+            await NoteService.update_note(db, note_id, {
+                "content": new_content,
+                "is_processing": False,
+                "tags": list(set(current_note.tags + tags)) if current_note else tags
+            })
+            print(f"[Image] Finished Note {note_id}")
+
+        except Exception as e:
+            print(f"[Image] Failed: {e}")
+            await NoteService.update_note(db, note_id, {
+                "is_processing": False,
+                "tags": ["processing_failed", "image"]
+            })
+
+async def process_audio_task(file_path: str, note_id: int):
+    """Background Audio Transcription"""
+    async with async_session_maker() as db:
+        try:
+            print(f"[Audio] Queued {file_path} for Note {note_id}")
+            text = await run_with_semaphore(MultimodalService.process_audio(file_path))
+            
+            await NoteService.update_note(db, note_id, {
+                "content": text,
+                "is_processing": False,
+                "tags": ["voice", "audio"]
+            })
+            print(f"[Audio] Finished Note {note_id}")
+        except Exception as e:
+            print(f"[Audio] Failed: {e}")
+            await NoteService.update_note(db, note_id, {
+                "is_processing": False,
+                "tags": ["processing_failed", "voice"]
+            })
