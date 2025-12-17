@@ -105,6 +105,11 @@ class NoteService:
             await db.commit()
 
     @staticmethod
+    async def get_note(db: AsyncSession, note_id: int) -> Optional[Note]:
+        result = await db.execute(select(Note).where(Note.id == note_id))
+        return result.scalars().first()
+
+    @staticmethod
     async def get_timeline(db: AsyncSession, skip: int = 0, limit: int = 20):
         # Return simple list of notes ordered by creation, excluding hidden chunks
         stmt = select(Note).where(Note.is_active == True, Note.is_hidden == False).order_by(desc(Note.created_at)).offset(skip).limit(limit)

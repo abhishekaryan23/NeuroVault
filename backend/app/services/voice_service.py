@@ -114,223 +114,244 @@ class VoiceService:
     @staticmethod
     async def process_command(db: AsyncSession, text: str, audio_path: str = None, background_tasks=None, generate_audio: bool = True) -> dict:
         """
-        Process a voice command via LLM and execute actions.
-        Returns dict with text response and audio.
+        Process a voice command.
+        - Always creates a 'Source Note' first (Processing State).
+        - If Text Mode (generate_audio=False): Returns immediately, processes in background.
+        - If Voice Mode (generate_audio=True): Awaits processing, returns audio.
         """
         print(f"[Voice] Processing: {text}")
+        
+        # 1. Create Source Note Immediately (Processing State)
+        source_note_in = NoteCreate(
+            content=text,
+            media_type="voice" if audio_path else "text",
+            tags=["voice_dump"] if audio_path else ["text_dump", "processing"],
+            is_hidden=False,
+            file_path=audio_path,
+            is_task=False,
+            is_processing=True # Key for Skeleton Loading
+        )
+        source_note = await NoteService.create_note(db, source_note_in)
+        print(f"[Voice] Created Source Note {source_note.id}, starting analysis...")
+
+        # 2. Define Processing Logic (To be run sync or async)
+        async def run_analysis(note_id: int):
+            from db.database import async_session_maker
+            # Create new session for background work
+            async with async_session_maker() as session:
+                return await VoiceService.analyze_and_update_note(session, note_id, text)
+
+        # 3. Dispatch based on Mode
+        if not generate_audio and background_tasks:
+            # TEXT MODE: Fire & Forget
+            # We return early so UI shows Skeleton
+            background_tasks.add_task(run_analysis, source_note.id)
+            return {
+                "response": "Processing note...",
+                "action_taken": "created_note",
+                "audio": None,
+                "note_id": source_note.id
+            }
+        else:
+            # VOICE MODE: Await result (Interactive)
+            # We reuse the logic but wait for it to get the audio/response
+            # Note: We can reuse the SAME 'db' session here since we are awaiting before return
+            result = await VoiceService.analyze_and_update_note(db, source_note.id, text)
+            
+            # Generate Audio
+            audio_b64 = None
+            if generate_audio and result.get("response"):
+                 audio_b64 = await VoiceService.synthesize_audio(result.get("response"))
+            
+            result["audio"] = audio_b64
+            return result
+
+    @staticmethod
+    async def analyze_and_update_note(db: AsyncSession, note_id: int, text: str) -> dict:
+        """
+        Core Logic: Two-Stage Pipeline (Router -> Parser)
+        """
         response_text = ""
-        intent = "CHAT"
-        query = None
+        category_intent = "SAVE" # Default
+        result_list_for_ui = []
         
-        # 1. Intent Classification
-        from datetime import datetime
-        now = datetime.now()
-        current_time_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
-        # Explicitly state "Today is..." to help LLM anchor
-        context_str = f"Today is {now.strftime('%A, %B %d, %Y')}. Current time is {now.strftime('%I:%M %p')}."
-        
-        print(f"[Voice] Context: {context_str}")
-        prompt = Prompts.VOICE_INTENT_TEMPLATE.format(text=text, current_time_context=context_str)
-        
+        # Imports needed for logic
         from pydantic import BaseModel
-        from typing import Optional, Literal
-
-        class VoiceIntentResponse(BaseModel):
-            intent: Literal["CREATE_NOTE", "TASK", "EVENT", "SEARCH", "CHAT"]
-            content: Optional[str] = None
-            category: Optional[Literal["Work", "Personal", "Home", "Health", "Finance", "Shopping", "Urgent", "Event"]] = None
-            today_context: Optional[str] = None # Echo today's date from context for grounding
-            time_expression: Optional[str] = None # Extraction of "tomorrow at 5pm", "next friday"
-            event_datetime: Optional[str] = None # Fallback ISO calculation
-            event_duration: Optional[int] = 60
-            query: Optional[str] = None
-            search_date_start: Optional[str] = None
-            search_date_end: Optional[str] = None
-            response: Optional[str] = None
-
+        from typing import Literal, Optional
+        from datetime import datetime
+        
         try:
-            # fast classification
-            print(f"[Voice] Sending to LLM ({settings.SUMMARY_MODEL})...")
-            
-            # Use Structured Outputs
-            llm_response = await NeuroVaultLLM.chat(
-                model=settings.SUMMARY_MODEL, 
-                messages=[
-                    {"role": "user", "content": prompt}
-                ], 
-                format=VoiceIntentResponse.model_json_schema()
-            )
-            
-            result_json = llm_response['message']['content']
-            data = json.loads(result_json)
-            intent = data.get("intent", "CHAT")
-            
-            print(f"[Voice] Intent: {intent}")
-            
-            if intent in ["CREATE_NOTE", "TASK", "EVENT"]:
-                # Phase 1: Always create the Source Note (Voice/Text Dump)
-                source_note_in = NoteCreate(
-                    content=text, # The full transcript
-                    media_type="voice" if audio_path else "text",
-                    tags=["voice_dump"] if audio_path else ["text_dump"],
-                    is_hidden=False, 
-                    file_path=audio_path,
-                    is_task=False
+            # --- PRE-PROCESSING ---
+            # Heuristic: If > 100 words, it's definitely a Note (SAVE).
+            word_count = len(text.split())
+            if word_count > 100:
+                print(f"[Voice] Word count {word_count} > 100. Skipping Router. Force SAVE.")
+                category_intent = "SAVE"
+            else:
+                # --- STAGE 1: ROUTER ---
+                print(f"[Voice] Stage 1: Router Analysis...")
+                from pydantic import BaseModel
+                from typing import Literal, Optional
+                
+                class RouterResponse(BaseModel):
+                    category: Literal["ACTION", "SAVE"]
+                    reasoning: Optional[str] = None
+                    confidence: float
+                
+                router_res = await NeuroVaultLLM.chat(
+                    model=settings.SUMMARY_MODEL,
+                    messages=[{"role": "user", "content": Prompts.ROUTER_PROMPT.format(text=text)}],
+                    format=RouterResponse.model_json_schema()
                 )
-                source_note = await NoteService.create_note(db, source_note_in) 
+                router_data = json.loads(router_res['message']['content'])
+                category_intent = router_data.get("category", "SAVE")
+                print(f"[Voice] Router Decision: {category_intent} (Conf: {router_data.get('confidence')})")
+
+            # --- STAGE 2: PARSER ---
+            from datetime import datetime
+            now = datetime.now()
+            current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            if category_intent == "ACTION":
+                # --- STAGE 2A: ACTION PARSER ---
+                print(f"[Voice] Stage 2A: Action Parser...")
                 
-                # Fire & Forget Summary for Voice Note
-                if background_tasks and len(text) > 50 and not source_note.is_hidden:
-                     background_tasks.add_task(NoteService.background_summarize_note, source_note.id) 
+                class ActionResponse(BaseModel):
+                    type: Literal["TASK", "EVENT", "SEARCH"]
+                    summary: str
+                    due_date: Optional[str] = None
+                    time: Optional[str] = None
+                    priority: int = 4
+                    category: Literal["Work", "Personal", "Health", "Finance", "General"] = "General"
+                    duration_minutes: int = 60
+
+                action_res = await NeuroVaultLLM.chat(
+                    model=settings.SUMMARY_MODEL,
+                    messages=[{"role": "user", "content": Prompts.ACTION_PARSER_PROMPT.format(text=text, current_time=current_time_str)}],
+                    format=ActionResponse.model_json_schema()
+                )
+                action_data = json.loads(action_res['message']['content'])
+                action_type = action_data.get("type", "TASK")
                 
-                # Phase 2: Create the Task/Event Node if applicable
-                is_task_intent = (intent in ["TASK", "EVENT"])
+                print(f"[Voice] Action Type: {action_type}")
                 
-                if is_task_intent:
-                    content = data.get("content", text)
-                    if intent == "EVENT":
-                        category = "Event"
+                if action_type == "SEARCH":
+                    # SEARCH LOGIC
+                    await NoteService.delete_note(db, note_id) # Cleanup temp note
+                    query = action_data.get("summary", text)
+                    results = await NoteService.search_notes(db, query, limit=5)
+                    
+                    for r in results:
+                        n = r['note']
+                        result_list_for_ui.append({
+                            "id": n.id, "content": n.content, "distance": r['distance'],
+                            "created_at": n.created_at.isoformat()
+                        })
+                    
+                    if not results:
+                        response_text = f"No results for '{query}'."
                     else:
-                        category = data.get("category")
+                        context_str = "\n".join([f"- {r['note'].content}" for r in results])
+                        summary_prompt = Prompts.VOICE_SEARCH_SUMMARY_TEMPLATE.format(text=text, context_str=context_str)
+                        s_res = await NeuroVaultLLM.generate(model=settings.SUMMARY_MODEL, prompt=summary_prompt)
+                        response_text = s_res['response']
+                        
+                else: 
+                    # TASK / EVENT LOGIC
+                    content = action_data.get("summary", text)
+                    cat = action_data.get("category", "General")
                     
-                    # Parse Event Time via Python (Robust)
+                    # Construct Event Time
                     event_at_dt = None
-                    time_expression = data.get("time_expression")
-                    llm_iso_date = data.get("event_datetime")
+                    due_date = action_data.get("due_date")
+                    time_str = action_data.get("time")
                     
-                    print(f"[Voice] Time Extraction: Expr='{time_expression}', ISO='{llm_iso_date}'")
-
-                    if time_expression:
-                        import dateparser
-                        # Use current time as anchor
-                        event_at_dt = dateparser.parse(
-                            time_expression, 
-                            settings={'RELATIVE_BASE': now, 'PREFER_DATES_FROM': 'future'}
-                        )
-                    
-                    # Fallback to LLM ISO if python parsing failed or missing expr
-                    if not event_at_dt and llm_iso_date:
+                    if due_date:
+                        dt_str = f"{due_date} {time_str if time_str else '00:00:00'}"
                         try:
-                            clean_date = llm_iso_date.replace("Z", "").strip()
-                            if "T" not in clean_date and " " in clean_date:
-                                clean_date = clean_date.replace(" ", "T")
-                            if "." in clean_date:
-                                clean_date = clean_date.split(".")[0]
-                            event_at_dt = datetime.fromisoformat(clean_date)
-                        except Exception as e:
-                            print(f"[Voice] Fallback Date Parse Error: {e}")
-                            
-                    print(f"[Voice] Final Calculated Date: {event_at_dt}")
-
-                    # CONFLICT DETECTION
-                    duration = data.get("event_duration")
-                    if duration is None:
-                        duration = 60
-                    conflict_name = None
-                    if event_at_dt:
-                        conflict_name = await VoiceService.check_conflict(db, event_at_dt, duration)
-                        if conflict_name:
-                             print(f"[Voice] Conflict Detected with '{conflict_name}'")
-
-                    task_note_in = NoteCreate(
-                        content=content,
-                        media_type="text", # The task itself is text
-                        tags=["task", category.lower()] if category else ["task"],
-                        # HIDE the generated task note from timeline (Agenda will fetch it via specific API)
-                        # The Source Note is already visible in timeline, so we avoid duplicates.
-                        is_hidden=True, 
-                        is_task=True,
-                        category=category,
-                        origin_note_id=source_note.id, # LINKING IS HERE
-                        event_at=event_at_dt,
-                        event_duration=duration
-                    )
-                    await NoteService.create_note(db, task_note_in)
-                
-                if intent == "EVENT":
-                        time_str = event_at_dt.strftime("%I:%M %p, %a %b %d") if event_at_dt else (time_expression or "scheduled time")
-                        response_text = f"I've scheduled '{content}' for {time_str}."
-                        if conflict_name:
-                            response_text += f" Warning: You have a clash with '{conflict_name}'."
-                elif is_task_intent:
-                    response_text = f"I've added '{content}' to your {category or 'General'} list."
-                else:
-                    response_text = f"I've saved that note."
-                
-            elif intent == "SEARCH":
-                query = data.get("query", text)
-                
-                # Parse search dates
-                start_date_str = data.get("search_date_start")
-                end_date_str = data.get("search_date_end")
-                start_date = None
-                end_date = None
-                
-                if start_date_str and end_date_str:
-                     try:
-                        clean_start = start_date_str.replace("Z", "").replace(" ", "T")
-                        clean_end = end_date_str.replace("Z", "").replace(" ", "T")
-                        if "." in clean_start: clean_start = clean_start.split(".")[0]
-                        if "." in clean_end: clean_end = clean_end.split(".")[0]
-                        start_date = datetime.fromisoformat(clean_start)
-                        end_date = datetime.fromisoformat(clean_end)
-                        print(f"[Voice] Search Date Range: {start_date} - {end_date}")
-                     except Exception as e:
-                        print(f"[Voice] Search Date Parse Error: {e}")
-
-                results = await NoteService.search_notes(db, query, limit=5, start_date=start_date, end_date=end_date)
-                
-                # Add raw results for Frontend Modal
-                result_list_for_ui = []
-                for r in results:
-                    note_obj = r['note']
-                    # Convert to simple dict
-                    result_list_for_ui.append({
-                        "id": note_obj.id,
-                        "content": note_obj.content,
-                        "event_at": note_obj.event_at.isoformat() if note_obj.event_at else None,
-                        "created_at": note_obj.created_at.isoformat(),
-                        "distance": r['distance']
-                    })
-
-                if not results:
-                    response_text = f"I couldn't find anything matching '{query}' in that time range."
-                else:
-                    context_str = "\n".join([f"- {r['note'].content} (Date: {r['note'].created_at})" for r in results])
-                    summary_prompt = Prompts.VOICE_SEARCH_SUMMARY_TEMPLATE.format(
-                        text=text,
-                        context_str=context_str
-                    )
-                    summary_res = await NeuroVaultLLM.generate(model=settings.SUMMARY_MODEL, prompt=summary_prompt)
-                    response_text = summary_res['response']
+                            # Handle potential "Z" or format issues roughly
+                            event_at_dt = datetime.fromisoformat(dt_str.replace("Z", ""))
+                        except:
+                            print(f"[Voice] Date Parse Failed: {dt_str}")
                     
-                # Append to result dict later
+                    # Conflict Check
+                    duration = action_data.get("duration_minutes", 60)
+                    conflict = None
+                    if action_type == "EVENT" and event_at_dt:
+                        conflict = await VoiceService.check_conflict(db, event_at_dt, duration)
+                    
+                    update_data = {
+                        "content": content,
+                        "is_processing": False,
+                        "is_task": True,
+                        "category": "Event" if action_type == "EVENT" else cat,
+                        "event_at": event_at_dt,
+                        "event_duration": duration,
+                        "tags": ["task", cat.lower()] + (["event"] if action_type == "EVENT" else [])
+                    }
+                    
+                    await NoteService.update_note(db, note_id, update_data)
+                    
+                    if action_type == "EVENT":
+                         time_s = event_at_dt.strftime("%I:%M %p, %b %d") if event_at_dt else "scheduled time"
+                         response_text = f"Scheduled '{content}' for {time_s}."
+                         if conflict: response_text += f" Warning: Clash with '{conflict}'."
+                    else:
+                         response_text = f"Added '{content}' to {cat} list."
 
+            else:
+                # --- STAGE 2B: NOTE PROCESSOR (SAVE) ---
+                print(f"[Voice] Stage 2B: Note Processor...")
                 
-            else: # CHAT
-                response_text = data.get("response", "I'm listening.")
+                class NoteResponse(BaseModel):
+                    generated_title: str
+                    tags: list[str]
+                    mentioned_entities: list[str]
+                    is_voice_transcript: bool
+
+                note_res = await NeuroVaultLLM.chat(
+                    model=settings.SUMMARY_MODEL,
+                    messages=[{"role": "user", "content": Prompts.NOTE_PROCESSOR_PROMPT.format(text=text)}],
+                    format=NoteResponse.model_json_schema()
+                )
+                note_data = json.loads(note_res['message']['content'])
                 
+                tags = note_data.get("tags", [])
+                if "note" not in tags: tags.append("note")
+                
+                # We append entities to tags for searchability? Or just store in summary?
+                # For now, let's add entities as tags
+                entities = note_data.get("mentioned_entities", [])
+                safe_entities = [e.replace(" ", "_").lower() for e in entities]
+                tags.extend(safe_entities)
+                
+                # Dedup tags
+                tags = list(set(tags))
+                
+                update_data = {
+                    "is_processing": False,
+                    "tags": tags,
+                    # We could update content to be cleaner, but user usually wants original dump.
+                    # We might update summary field if we extracted a title?
+                    # NoteService doesn't expose summary update easily unless we map it.
+                    # Let's just update tags and status.
+                }
+                await NoteService.update_note(db, note_id, update_data)
+                response_text = "Note saved."
+
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"[Voice] Error: {e}")
-            response_text = f"I'm sorry, I had trouble processing that command. Error: {str(e)}"
-            
-        # Generate Audio via Voice Engine (Kokoro)
-        audio_b64 = None
-        if generate_audio:
-            audio_b64 = await VoiceService.synthesize_audio(response_text)
-        
-        result = {
-            "response": response_text, 
-            "audio": audio_b64,
-            "audio": audio_b64,
-            "intent": intent,
-            "query": query,
-            "search_results": locals().get("result_list_for_ui", []) 
+            print(f"[Voice] Pipeline Error: {e}")
+            response_text = "Error processing command."
+            await NoteService.update_note(db, note_id, {"is_processing": False})
+
+        return {
+            "response": response_text,
+            "intent": category_intent,
+            "query": None, # Could populate if search
+            "search_results": result_list_for_ui
         }
-             
-        return result
 
     @staticmethod
     async def synthesize_audio(text: str) -> str:
